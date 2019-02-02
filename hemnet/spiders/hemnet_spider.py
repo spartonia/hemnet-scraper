@@ -5,15 +5,16 @@ import re
 import scrapy
 from hemnet.items import HemnetItem
 from scrapy import Selector
+from scrapy.spidermiddlewares.httperror import HttpError
+from twisted.internet.error import TimeoutError, TCPTimedOutError
 
 from sqlalchemy.orm import sessionmaker
 
 from hemnet.models import HemnetItem as HemnetSQL, db_connect, create_hemnet_table
 
-# BASE_URL = 'http://www.hemnet.se/salda/bostader?location_ids%5B%5D=17920'
-
-BASE_URL = 'http://www.hemnet.se/salda/bostader?'
-
+# BASE_URL = 'http://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types[]=villa&item_types[]=radhus&item_types[]=bostadsratt'
+# BASE_URL = 'http://www.hemnet.se/salda/bostader?'
+BASE_URL = 'https://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types%5B%5D=villa&item_types%5B%5D=radhus&item_types%5B%5D=bostadsratt&sold_age=13m'
 
 def start_urls(start, stop):
     return ['{}&page={}'.format(BASE_URL, x) for x in xrange(start, stop)]
@@ -27,13 +28,29 @@ class HemnetSpider(scrapy.Spider):
         super(HemnetSpider, self).__init__(*args, **kwargs)
         self.start = int(start)
         self.stop = int(stop)
+        self.err_file = 'errors.txt'
         engine = db_connect()
         create_hemnet_table(engine)
         self.session = sessionmaker(bind=engine)()
 
     def start_requests(self):
         for url in start_urls(self.start, self.stop):
-            yield scrapy.Request(url, self.parse)
+            yield scrapy.Request(url, self.parse, errback=self.download_err_back)
+
+    def _write_err(self, code, url):
+        with open(self.err_file, 'a') as f:
+            f.write('{}: {}\n'.format(code, url))
+
+    def download_err_back(self, failure):
+        if failure.check(HttpError):
+            response = failure.value.response
+            self._write_err(response.status, response.url)
+        elif failure.check(TimeoutError, TCPTimedOutError):
+            request = failure.request
+            self._write_err('TimeoutError', request.url)
+        else:
+            request = failure.request
+            self._write_err('Other', request.url)
 
     def parse(self, response):
         urls = response.css('#search-results li > div > a::attr("href")')
@@ -41,12 +58,12 @@ class HemnetSpider(scrapy.Spider):
             session = self.session
             q = session.query(HemnetSQL).filter(HemnetSQL.hemnet_id == get_hemnet_id(url))
             if not session.query(q.exists()).scalar():
-                yield scrapy.Request(url, self.parse_detail_page)
+                yield scrapy.Request(url, self.parse_detail_page, errback=self.download_err_back)
 
     def parse_detail_page(self, response):
         item = HemnetItem()
 
-        broker = response.css('.broker-info > p')[0]  # type: Selector
+        broker = response.css('.broker-info > div.broker')[0]  # type: Selector
         property_attributes = get_property_attributes(response)
 
         item['url'] = response.url
@@ -73,43 +90,102 @@ class HemnetSpider(scrapy.Spider):
             item['square_meters'] = float(property_attributes.get(u'Boarea', '').split(' ')[0].replace(',', '.'))
         except ValueError:
             pass
+
         try:
-            cost = int(property_attributes.get(u'Avgift/månad', '').replace(u' kr/m\xe5n', '').replace(u'\xa0', u''))
+            cost = int(property_attributes.get(u'Driftskostnad', '').replace(u' kr/\xe5r', '').replace(u'\xa0', u''))
         except ValueError:
             cost = None
         item['cost_per_year'] = cost
+
         item['year'] = property_attributes.get(u'Byggår', '')  # can be '2008-2009'
 
-        item['broker_name'] = broker.css('strong::text').extract_first()
+        try:
+            association = property_attributes.get(u'Förening').strip()
+        except:
+            association = None
+        item['association'] = association
+
+        try:
+            lot_size = int(property_attributes.get(u'Tomtarea').strip().rsplit(' ')[0].replace(u'\xa0', ''))
+        except:
+            lot_size = None
+        item['lot_size'] = lot_size
+
+        try:
+            biarea = int(property_attributes.get(u'Biarea').strip().rsplit(' ')[0].replace(u'\xa0', ''))
+        except:
+            biarea = None
+        item['biarea'] = biarea
+
+        item['broker_name'] = broker.css('b::text').extract_first().strip()
         item['broker_phone'] = strip_phone(broker.css('.phone-number::attr("href")').extract_first())
 
         try:
-            email = broker.xpath("a[contains(@href, 'mailto:')]/@href").extract_first().replace(u'mailto:', u'')
-            item['broker_email'] = email
-        except AttributeError:
+            encoded_email = broker.css('a.broker__email::attr(href)').extract_first()
+            item['broker_email'] = decode_email(encoded_email)
+        except:
             pass
 
-        broker_firm = response.css('.broker-info > p')[1]  # type: Selector
-        item['broker_firm'] = broker_firm.css('strong::text').extract_first()
         try:
-            firm_phone = broker_firm.xpath("a[contains(@href, 'tel:')]/@href").extract_first()
-            item['broker_firm_phone'] = firm_phone.replace(u'tel:', u'')
-        except AttributeError:
-            pass
+            broker_firm = broker.css('a::text').extract_first().strip()
+            if not broker_firm:
+                broker_firm = broker.css('p:nth-child(2)::text').extract_first().strip()
+        except:
+            broker_firm = None
+        item['broker_firm'] = broker_firm
 
-        raw_price = response.css('.sold-property-price > span::text').extract_first()
+        try:
+            firm_phone = (broker.css('.phone-number::attr("href")')[1]).extract()
+            broker_firm_phone = strip_phone(firm_phone)
+        except:
+            broker_firm_phone = None
+        item['broker_firm_phone'] = broker_firm_phone
+
+        raw_price = response.css('.sold-property__price-value::text').extract_first()
         item['price'] = price_to_int(raw_price)
 
         get_selling_statistics(response, item)
 
-        detail = response.css('.sold-property-details')[0]
+        metadata = response.css('.sold-property__metadata')[0]
 
-        item['sold_date'] = detail.css('.metadata > time::attr("datetime")').extract_first()
-        item['address'] = detail.css('h1::text').extract_first()
+        item['sold_date'] = metadata.css('time::attr(datetime)').extract_first()
+        item['address'] = ' '.join(response.css('.sold-property__address::text').extract()).strip()
 
-        item['geographic_area'] = detail.css('.area::text').extract_first().strip().lstrip(u',').strip().rstrip(u',')
+        meta_text = ' '.join([i.strip() for i in metadata.css('::text').extract()])
+        item['geographic_area'] = extract_municipality(meta_text)
 
         yield item
+
+
+def extract_municipality(address_line):
+    pattern_comma = '(?<=,)(.*)(?=kommun)'
+    pattern_dash = '(?<=-)(.*)(?=kommun)'
+    address_line = address_line.replace('\n', '')
+    grouped = re.search(pattern_comma, address_line)
+    if not grouped:
+        grouped = re.search(pattern_dash, address_line)
+    try:
+        kommun = grouped.group(1).strip()
+    except:
+        kommun = None
+    finally:
+        return kommun
+
+
+def cfDecodeEmail(encodedString):
+    r = int(encodedString[:2],16)
+    email = ''.join([chr(int(encodedString[i:i+2], 16) ^ r) for i in range(2, len(encodedString), 2)])
+    return email
+
+
+def decode_email(encoded_str):
+    # u'/cdn-cgi/l/email-protection#b2d8d7c1c2d7c09cdedbdcd6c3c4dbc1c6f2dac7c1dfd3dcdad3d5d0d7c0d59cc1d7'
+    try:
+        decoded = cfDecodeEmail(encoded_str.split('#')[-1])
+    except:
+        decoded = None
+    finally:
+        return decoded
 
 
 def get_hemnet_id(url):
@@ -118,22 +194,26 @@ def get_hemnet_id(url):
 
 
 def get_selling_statistics(response, item):
-    for li in response.css('ul.selling-statistics > li'):
-        key = li.css('::text').extract_first().strip()
-        value = li.css('strong::text').extract_first()
-        if value:
-            if key == u'Begärt pris':
-                item['asked_price'] = price_to_int(value)
-            if key == u'Prisutveckling':
-                item['price_trend_flat'], item['price_trend_percentage'] = price_trend(value)
-            if key == u'Pris per kvadratmeter':
-                item['price_per_square_meter'] = int(value.replace(u'\xa0', '').split(' ')[0])
+    a = response.css('.sold-property__price-stats > dt::text').extract()
+    x = [x.strip() for x in a]
+    b = response.css('.sold-property__price-stats > dd::text').extract()
+    stats = dict(zip(x, b))
+    try:
+        item['asked_price'] = price_to_int(stats[u'Begärt pris'])
+    except:
+        pass
+
+    try:
+        raw_price = stats[u'Pris per kvadratmeter']
+        item['price_per_square_meter'] = int(raw_price.replace(u'\xa0', '').split(' ')[0])
+    except:
+        pass
 
 
 def get_property_attributes(response):
-    a = response.css('ul.property-attributes > li::text').extract()
+    a = response.css('.sold-property__attributes > dt::text').extract()
     x = [x.strip() for x in a]
-    b = response.css('ul.property-attributes > li > strong::text').extract()
+    b = response.css('.sold-property__attributes > dd::text').extract()
 
     return dict(zip(x, b))
 
