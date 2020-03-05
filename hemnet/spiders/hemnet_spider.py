@@ -282,21 +282,6 @@ def extract_coords(response):
     return lat, lon
 
 
-def extract_municipality(address_line):
-    pattern_comma = '(?<=,)(.*)(?=kommun)'
-    pattern_dash = '(?<=-)(.*)(?=kommun)'
-    address_line = address_line.replace('\n', '')
-    grouped = re.search(pattern_comma, address_line)
-    if not grouped:
-        grouped = re.search(pattern_dash, address_line)
-    try:
-        kommun = grouped.group(1).strip()
-    except:
-        kommun = None
-    finally:
-        return kommun
-
-
 def cfDecodeEmail(encodedString):
     r = int(encodedString[:2],16)
     email = ''.join([chr(int(encodedString[i:i+2], 16) ^ r) for i in
@@ -326,25 +311,8 @@ def get_property_attributes(response):
     return dict(zip(x, b))
 
 
-def price_to_int(price_text):
-    return int(price_text.replace(u'\xa0', u'').replace(u' kr', u'').encode())
-
-
 def strip_phone(phone_text):
     if phone_text:
         return phone_text.replace(u'tel:', u'')
     else:
         return u''
-
-
-def price_trend(price_text):
-    r = '(?P<sign>[+-])(?P<flat>\d*)\([+-]?(?P<percentage>\d*)\%\)$'
-
-    temp = price_text.replace(u'\xa0', '').replace(' ', '').replace('kr', '')
-
-    matches = re.search(r, temp)
-
-    sign = matches.group('sign')
-    flat = int('{}{}'.format(sign, matches.group('flat')))
-    percentage = int('{}{}'.format(sign, matches.group('percentage')))
-    return flat, percentage
