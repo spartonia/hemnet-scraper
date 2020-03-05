@@ -2,19 +2,25 @@
 
 from urlparse import urlparse
 import re
+import json
 import scrapy
-from hemnet.items import HemnetItem
+from hemnet.items import HemnetItem, HemnetCompItem
 from scrapy import Selector
 from scrapy.spidermiddlewares.httperror import HttpError
 from twisted.internet.error import TimeoutError, TCPTimedOutError
 
 from sqlalchemy.orm import sessionmaker
 
-from hemnet.models import HemnetItem as HemnetSQL, db_connect, create_hemnet_table
+from hemnet.models import (
+    HemnetItem as HemnetSQL,
+    db_connect,
+    create_hemnet_table
+)
 
 # BASE_URL = 'http://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types[]=villa&item_types[]=radhus&item_types[]=bostadsratt'
 # BASE_URL = 'http://www.hemnet.se/salda/bostader?'
-BASE_URL = 'https://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types%5B%5D=villa&item_types%5B%5D=radhus&item_types%5B%5D=bostadsratt&sold_age=13m'
+BASE_URL = 'https://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types%5B%5D=villa&item_types%5B%5D=radhus&item_types%5B%5D=bostadsratt&sold_age=11m'
+
 
 def start_urls(start, stop):
     return ['{}&page={}'.format(BASE_URL, x) for x in xrange(start, stop)]
@@ -28,17 +34,17 @@ class HemnetSpider(scrapy.Spider):
         super(HemnetSpider, self).__init__(*args, **kwargs)
         self.start = int(start)
         self.stop = int(stop)
-        self.err_file = 'errors.txt'
         engine = db_connect()
         create_hemnet_table(engine)
         self.session = sessionmaker(bind=engine)()
 
     def start_requests(self):
         for url in start_urls(self.start, self.stop):
-            yield scrapy.Request(url, self.parse, errback=self.download_err_back)
+            yield scrapy.Request(url, self.parse,
+                                 errback=self.download_err_back)
 
     def _write_err(self, code, url):
-        with open(self.err_file, 'a') as f:
+        with open(self.name + '_err.txt', 'a') as f:
             f.write('{}: {}\n'.format(code, url))
 
     def download_err_back(self, failure):
@@ -56,48 +62,68 @@ class HemnetSpider(scrapy.Spider):
         urls = response.css('#search-results li > div > a::attr("href")')
         for url in urls.extract():
             session = self.session
-            q = session.query(HemnetSQL).filter(HemnetSQL.hemnet_id == get_hemnet_id(url))
+            q = session.query(HemnetSQL)\
+                .filter(HemnetSQL.hemnet_id == get_hemnet_id(url))
             if not session.query(q.exists()).scalar():
-                yield scrapy.Request(url, self.parse_detail_page, errback=self.download_err_back)
+                yield scrapy.Request(url, self.parse_detail_page,
+                                     errback=self.download_err_back)
+
+    @staticmethod
+    def _get_layer_data(response):
+        pattern = 'dataLayer\s*=\s*(\[.*\]);'
+        g = re.search(pattern, response.body)
+        d = json.loads(g.group(1))
+        return d
 
     def parse_detail_page(self, response):
+
+        props = {}
+        try:
+            layer_data = self._get_layer_data(response)
+        except:
+            self._write_err('JSONError', response.url)
+        else:
+            props = next((el for el in layer_data if u'sold_property' in el),
+                        None)['sold_property']
+
         item = HemnetItem()
 
-        broker = response.css('.broker-info > div.broker')[0]  # type: Selector
+        # type: Selector
+        broker_sel = response.css('.broker-contact-card__information')[0]
         property_attributes = get_property_attributes(response)
 
         item['url'] = response.url
-
         slug = urlparse(response.url).path.split('/')[-1]
-
-        item['hemnet_id'] = get_hemnet_id(response.url)
-
+        item['hemnet_id'] = props.get('id')
         item['type'] = slug.split('-')[0]
 
-        raw_rooms = property_attributes.get(u'Antal rum', '').replace(u' rum', u'').replace(u',', u'.')
+        raw_rooms = props.get('rooms')
         try:
             item['rooms'] = float(raw_rooms)
         except ValueError:
             pass
 
         try:
-            fee = int(property_attributes.get(u'Avgift/månad', '').replace(u' kr/m\xe5n', '').replace(u'\xa0', u''))
+            fee = int(property_attributes.get(u'Avgift/månad', '')
+                      .replace(u' kr/m\xe5n', '').replace(u'\xa0', u''))
         except ValueError:
             fee = None
         item['monthly_fee'] = fee
 
         try:
-            item['square_meters'] = float(property_attributes.get(u'Boarea', '').split(' ')[0].replace(',', '.'))
+            item['square_meters'] = float(props.get('living_area'))
         except ValueError:
             pass
 
         try:
-            cost = int(property_attributes.get(u'Driftskostnad', '').replace(u' kr/\xe5r', '').replace(u'\xa0', u''))
+            cost = int(property_attributes.get(u'Driftskostnad', '')
+                       .replace(u' kr/\xe5r', '').replace(u'\xa0', u''))
         except ValueError:
             cost = None
         item['cost_per_year'] = cost
 
-        item['year'] = property_attributes.get(u'Byggår', '')  # can be '2008-2009'
+        # can be '2008-2009'
+        item['year'] = property_attributes.get(u'Byggår', '')
 
         try:
             association = property_attributes.get(u'Förening').strip()
@@ -106,55 +132,117 @@ class HemnetSpider(scrapy.Spider):
         item['association'] = association
 
         try:
-            lot_size = int(property_attributes.get(u'Tomtarea').strip().rsplit(' ')[0].replace(u'\xa0', ''))
+            lot_size = int(property_attributes.get(u'Tomtarea')
+                           .strip().rsplit(' ')[0].replace(u'\xa0', ''))
         except:
             lot_size = None
         item['lot_size'] = lot_size
 
         try:
-            biarea = int(property_attributes.get(u'Biarea').strip().rsplit(' ')[0].replace(u'\xa0', ''))
+            biarea = int(property_attributes.get(u'Biarea').strip()
+                         .rsplit(' ')[0].replace(u'\xa0', ''))
         except:
             biarea = None
         item['biarea'] = biarea
 
-        item['broker_name'] = broker.css('b::text').extract_first().strip()
-        item['broker_phone'] = strip_phone(broker.css('.phone-number::attr("href")').extract_first())
+        item['broker_name'] = broker_sel.css('strong::text')\
+            .extract_first().strip()
+        phone, encoded_email = broker_sel.\
+            css('a.broker-contact__link::attr("href")').extract()
+        item['broker_phone'] = strip_phone(phone)
 
         try:
-            encoded_email = broker.css('a.broker__email::attr(href)').extract_first()
-            item['broker_email'] = decode_email(encoded_email)
+            item['broker_email'] = decode_email(encoded_email).split('?')[0]
         except:
             pass
 
-        try:
-            broker_firm = broker.css('a::text').extract_first().strip()
-            if not broker_firm:
-                broker_firm = broker.css('p:nth-child(2)::text').extract_first().strip()
-        except:
-            broker_firm = None
-        item['broker_firm'] = broker_firm
+        item['broker_firm'] = props.get('broker_agency')
 
         try:
-            firm_phone = (broker.css('.phone-number::attr("href")')[1]).extract()
+            firm_phone = (broker_sel.css('.phone-number::attr("href")')[1])\
+                .extract()
             broker_firm_phone = strip_phone(firm_phone)
         except:
             broker_firm_phone = None
         item['broker_firm_phone'] = broker_firm_phone
-
-        raw_price = response.css('.sold-property__price-value::text').extract_first()
-        item['price'] = price_to_int(raw_price)
-
-        get_selling_statistics(response, item)
-
-        metadata = response.css('.sold-property__metadata')[0]
-
-        item['sold_date'] = metadata.css('time::attr(datetime)').extract_first()
-        item['address'] = ' '.join(response.css('.sold-property__address::text').extract()).strip()
-
-        meta_text = ' '.join([i.strip() for i in metadata.css('::text').extract()])
-        item['geographic_area'] = extract_municipality(meta_text)
-
+        item['price'] = props.get('selling_price')
+        item['asked_price'] = props.get('price')
+        item['sold_date'] = props.get('sold_at_date')
+        item['address'] = props.get('street_address')
+        item['geographic_area'] = props.get('location')
         yield item
+
+        prev_page_url = response.css('link[rel=prev]::attr(href)')\
+            .extract_first()
+        lat, lon = extract_coords(response)
+
+        yield scrapy.Request(prev_page_url, self.parse_prev_page,
+                             meta={'lat': lat, 'lon': lon,
+                                   'salda_id': props['id']},
+                             errback=self.download_err_back)
+
+    def parse_prev_page(self, response):
+        pattern = 'dataLayer\s*=\s*(\[.*\]);'
+        g = re.search(pattern, response.body)
+        try:
+            d = json.loads(g.group(1))
+        except:
+            self._write_err('JSONError', response.url)
+        else:
+            prop = next((e for e in d if u'property' in e), None)['property']
+
+            item = HemnetCompItem()
+
+            item['url'] = response.url
+
+            item['lattitude'] = response.meta['lat']
+            item['longitude'] = response.meta['lon']
+
+            item['salda_id'] = response.meta['salda_id']
+
+            locations = prop.get('locations', {})
+
+            item['city'] = locations.get('city')
+            item['district'] = locations.get('district')
+            item['postal_city'] = locations.get('postal_city')
+            item['country'] = locations.get('country')
+            item['municipality'] = locations.get('municipality')
+            item['region'] = locations.get('county')
+            item['street'] = locations.get('street')
+
+            item['offers_selling_price'] = prop.get('offers_selling_price')
+            item['living_area'] = prop.get('living_area')
+            item['rooms'] = prop.get('rooms')
+            item['hemnet_id'] = prop.get('id')
+            item['cost_per_year'] = prop.get('driftkostnad')
+            item['new_production'] = prop.get('new_production')
+            item['broker_firm'] = prop.get('broker_firm')
+            item['upcoming_open_houses'] = prop.get('upcoming_open_houses')
+            item['location'] = prop.get('location')
+            item['home_swapping'] = prop.get('home_swapping')
+            item['has_price_change'] = prop.get('has_price_change')
+            item['status'] = prop.get('status')
+            item['price'] = prop.get('price')
+            item['monthly_fee'] = prop.get('borattavgift')
+            item['main_location'] = prop.get('main_location')
+            item['publication_date'] = prop.get('publication_date')
+            item['has_active_toplisting'] = prop.get('has_active_toplisting')
+            item['images_count'] = prop.get('images_count')
+            item['item_type'] = prop.get('item_type')
+            item['price_per_m2'] = prop.get('price_per_m2')
+            item['street_address'] = prop.get('street_address')
+
+            yield item
+
+
+def extract_coords(response):
+    coord_pattern = 'coordinate.*\[(\d{2}\.\d+\,\d{2}\.\d+)\]'
+    g = re.search(coord_pattern, response.body)
+    try:
+        lat, lon = map(float, g.group(1).split(','))
+    except:
+        lat, lon = None, None
+    return lat, lon
 
 
 def extract_municipality(address_line):
@@ -174,40 +262,23 @@ def extract_municipality(address_line):
 
 def cfDecodeEmail(encodedString):
     r = int(encodedString[:2],16)
-    email = ''.join([chr(int(encodedString[i:i+2], 16) ^ r) for i in range(2, len(encodedString), 2)])
+    email = ''.join([chr(int(encodedString[i:i+2], 16) ^ r) for i in
+                     range(2, len(encodedString), 2)])
     return email
 
 
 def decode_email(encoded_str):
-    # u'/cdn-cgi/l/email-protection#b2d8d7c1c2d7c09cdedbdcd6c3c4dbc1c6f2dac7c1dfd3dcdad3d5d0d7c0d59cc1d7'
+    # u'/cdn-cgi/l/email-protection#b2d8d7c1c2d7c09cdead...'
     try:
         decoded = cfDecodeEmail(encoded_str.split('#')[-1])
     except:
         decoded = None
-    finally:
-        return decoded
+    return decoded
 
 
 def get_hemnet_id(url):
     slug = urlparse(url).path.split('/')[-1]
     return int(slug.split('-')[-1])
-
-
-def get_selling_statistics(response, item):
-    a = response.css('.sold-property__price-stats > dt::text').extract()
-    x = [x.strip() for x in a]
-    b = response.css('.sold-property__price-stats > dd::text').extract()
-    stats = dict(zip(x, b))
-    try:
-        item['asked_price'] = price_to_int(stats[u'Begärt pris'])
-    except:
-        pass
-
-    try:
-        raw_price = stats[u'Pris per kvadratmeter']
-        item['price_per_square_meter'] = int(raw_price.replace(u'\xa0', '').split(' ')[0])
-    except:
-        pass
 
 
 def get_property_attributes(response):
@@ -240,4 +311,3 @@ def price_trend(price_text):
     flat = int('{}{}'.format(sign, matches.group('flat')))
     percentage = int('{}{}'.format(sign, matches.group('percentage')))
     return flat, percentage
-

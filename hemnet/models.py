@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, Boolean
 from sqlalchemy.engine.url import URL
 from sqlalchemy.ext.declarative import declarative_base
@@ -51,6 +53,7 @@ class HemnetItem(DeclarativeBase):
 
     address = Column(String, default='')
     geographic_area = Column(String, default='')
+    collected_at = Column(Date, default=datetime.now())
 
 
 class HemnetCompItem(DeclarativeBase):
@@ -82,7 +85,6 @@ class HemnetCompItem(DeclarativeBase):
     living_area = Column(Float)
     rooms = Column(Float, nullable=True)
 
-
     broker_firm = Column(String, nullable=True)
 
     new_production = Column(Boolean)
@@ -95,7 +97,9 @@ class HemnetCompItem(DeclarativeBase):
     price = Column(Integer)
     cost_per_year = Column(Integer, nullable=True)
     monthly_fee = Column(Integer, nullable=True)
-    publication_date = Column(Date)
+    publication_date = Column(Date, nullable=True)
     images_count = Column(Integer, nullable=True)
     item_type = Column(String, nullable=True)
     price_per_m2 = Column(Integer, nullable=True)
+
+    collected_at = Column(Date, default=datetime.now())

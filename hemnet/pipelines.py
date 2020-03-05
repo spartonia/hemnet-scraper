@@ -6,7 +6,10 @@
 # See: http://doc.scrapy.org/en/latest/topics/item-pipeline.html
 
 from sqlalchemy.orm import sessionmaker
-from .models import HemnetItem, HemnetCompItem, db_connect, create_hemnet_table
+from .models import db_connect, create_hemnet_table
+from .models import HemnetItem as HemnetDBItem
+from .models import HemnetCompItem as HemnetCompDBItem
+from .items import HemnetItem
 
 
 class HemnetPipeline(object):
@@ -17,9 +20,10 @@ class HemnetPipeline(object):
 
     def process_item(self, item, spider):
         session = self.Session()
-        # deal = HemnetItem(**item)
-        # TODO: do dynamically..
-        deal = HemnetCompItem(**item)
+        if isinstance(item, HemnetItem):
+            deal = HemnetDBItem(**item)
+        else:
+            deal = HemnetCompDBItem(**item)
 
         try:
             session.add(deal)

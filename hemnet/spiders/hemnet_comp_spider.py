@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 
-from urlparse import urlparse
 import re
 import json
 import scrapy
-from hemnet.items import HemnetItem, HemnetCompItem
-from scrapy import Selector
 from scrapy.spidermiddlewares.httperror import HttpError
 from twisted.internet.error import TimeoutError, TCPTimedOutError
 
@@ -25,13 +22,12 @@ class HemnetSpider(scrapy.Spider):
 
     def __init__(self, *args, **kwargs):
         super(HemnetSpider, self).__init__(*args, **kwargs)
-        self.err_file = 'errors_comp.txt'
         engine = db_connect()
         create_hemnet_table(engine)
         self.session = sessionmaker(bind=engine)()
 
     def _write_err(self, code, url):
-        with open(self.err_file, 'a') as f:
+        with open(self.name + '_err.txt', 'a') as f:
             f.write('{}: {}\n'.format(code, url))
 
     def download_err_back(self, failure):
@@ -51,11 +47,13 @@ class HemnetSpider(scrapy.Spider):
         comp_ids = [i for i, in session.query(HemnetCompSQL.salda_id).all()]
         for salda_id, url in salda_items:
             if salda_id not in comp_ids:
-                yield scrapy.Request(url, self.parse_salda, errback=self.download_err_back,
+                yield scrapy.Request(url, self.parse_salda,
+                                     errback=self.download_err_back,
                     meta={'salda_id': salda_id})
 
     def parse_salda(self, response):
-        prev_page_url = response.css('link[rel=prev]::attr(href)').extract_first()
+        prev_page_url = response.css('link[rel=prev]::attr(href)')\
+            .extract_first()
         pattern = 'coordinate.*\[(\d{2}\.\d+\,\d{2}\.\d+)\]'
         g = re.search(pattern, response.body)
         salda_id = response.meta['salda_id']
