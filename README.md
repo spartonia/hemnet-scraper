@@ -1,5 +1,7 @@
 # hemnet-scraper
 
+[Forked from [here](https://github.com/thrawny/hemnet-scraper) with updates]
+
 Scrape hemnet final prices. Uses postgres as a backend to manage state of the currently scraped items. The spider will skip items that have already been processed.
 
 To simply scrape some items:
