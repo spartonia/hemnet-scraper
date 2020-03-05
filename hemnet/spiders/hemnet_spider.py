@@ -1,45 +1,77 @@
 # -*- coding: utf-8 -*-
 
-from urlparse import urlparse
 import re
 import json
 import scrapy
-from hemnet.items import HemnetItem, HemnetCompItem
+
+from urlparse import urlparse, urljoin
+from urllib import urlencode
+from itertools import product
+
 from scrapy import Selector
 from scrapy.spidermiddlewares.httperror import HttpError
 from twisted.internet.error import TimeoutError, TCPTimedOutError
-
 from sqlalchemy.orm import sessionmaker
 
+from hemnet.items import HemnetItem, HemnetCompItem
 from hemnet.models import (
     HemnetItem as HemnetSQL,
     db_connect,
     create_hemnet_table
 )
 
-# BASE_URL = 'http://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types[]=villa&item_types[]=radhus&item_types[]=bostadsratt'
-# BASE_URL = 'http://www.hemnet.se/salda/bostader?'
-BASE_URL = 'https://www.hemnet.se/salda/bostader?location_ids%5B%5D=17744&item_types%5B%5D=villa&item_types%5B%5D=radhus&item_types%5B%5D=bostadsratt&sold_age=11m'
+
+BASE_URL = 'http://www.hemnet.se/salda/bostader?'
+
+location_ids = [17744]
+item_types = ['radhus', 'bostadsratt', 'villa']
+rooms = [None, 1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 100]
+living_area = [None, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 500]
+fee = [None, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 7000, 30000]
 
 
-def start_urls(start, stop):
-    return ['{}&page={}'.format(BASE_URL, x) for x in xrange(start, stop)]
+def url_queries():
+    d_ = {
+        'location_ids': location_ids,
+        'item_types': item_types,
+        'rooms': rooms,
+        'living_area': zip(living_area, living_area[1:]),
+        'fee': zip(fee, fee[1:]),
+    }
+
+    def _encode_query(params):
+        url_query = {
+            'location_ids[]': params['location_ids'],
+            'item_types[]': params['item_types'],
+            'rooms_min': params['rooms'],
+            'rooms_max': params['rooms'],
+            'living_area_min': params['living_area'][0],
+            'living_area_max': params['living_area'][1],
+            'fee_min': params['fee'][0],
+            'fee_max': params['fee'][1],
+        }
+        return urlencode(url_query)
+
+    param_list = [dict(zip(d_, v)) for v in product(*d_.values())]
+    return [_encode_query(p) for p in param_list]
+
+
+def start_urls():
+    return [BASE_URL + qry for qry in url_queries()]
 
 
 class HemnetSpider(scrapy.Spider):
     name = 'hemnetspider'
     rotate_user_agent = True
 
-    def __init__(self, start=1, stop=10, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super(HemnetSpider, self).__init__(*args, **kwargs)
-        self.start = int(start)
-        self.stop = int(stop)
         engine = db_connect()
         create_hemnet_table(engine)
         self.session = sessionmaker(bind=engine)()
 
     def start_requests(self):
-        for url in start_urls(self.start, self.stop):
+        for url in start_urls():
             yield scrapy.Request(url, self.parse,
                                  errback=self.download_err_back)
 
@@ -68,6 +100,12 @@ class HemnetSpider(scrapy.Spider):
                 yield scrapy.Request(url, self.parse_detail_page,
                                      errback=self.download_err_back)
 
+        next_href = response.css('a.next_page::attr("href")').extract_first()
+        if next_href:
+            next_url = urljoin(response.url, next_href)
+            scrapy.Request(next_url, self.parse_detail_page,
+                           errback=self.download_err_back)
+
     @staticmethod
     def _get_layer_data(response):
         pattern = 'dataLayer\s*=\s*(\[.*\]);'
@@ -84,7 +122,7 @@ class HemnetSpider(scrapy.Spider):
             self._write_err('JSONError', response.url)
         else:
             props = next((el for el in layer_data if u'sold_property' in el),
-                        None)['sold_property']
+                         {}).get('sold_property', {})
 
         item = HemnetItem()
 
@@ -182,14 +220,13 @@ class HemnetSpider(scrapy.Spider):
                              errback=self.download_err_back)
 
     def parse_prev_page(self, response):
-        pattern = 'dataLayer\s*=\s*(\[.*\]);'
-        g = re.search(pattern, response.body)
         try:
-            d = json.loads(g.group(1))
+            layer_data = self._get_layer_data(response)
         except:
             self._write_err('JSONError', response.url)
         else:
-            prop = next((e for e in d if u'property' in e), None)['property']
+            prop = next((e for e in layer_data if u'property' in e),
+                        {}).get('property', {})
 
             item = HemnetCompItem()
 
