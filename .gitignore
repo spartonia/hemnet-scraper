@@ -6,3 +6,4 @@ build
 crawls
 project.egg-info
 eggs
+.idea/
