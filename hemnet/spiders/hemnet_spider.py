@@ -210,7 +210,6 @@ class HemnetSpider(scrapy.Spider):
         item['sold_date'] = props.get('sold_at_date')
         item['address'] = props.get('street_address')
         item['geographic_area'] = props.get('location')
-        import ipdb; ipdb.set_trace()
         yield item
 
         prev_page_url = response.css('link[rel=prev]::attr(href)')\
