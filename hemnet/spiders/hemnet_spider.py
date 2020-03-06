@@ -140,7 +140,7 @@ class HemnetSpider(scrapy.Spider):
         raw_rooms = props.get('rooms')
         try:
             item['rooms'] = float(raw_rooms)
-        except ValueError:
+        except Exception:
             pass
 
         try:
@@ -158,7 +158,7 @@ class HemnetSpider(scrapy.Spider):
         try:
             cost = int(property_attributes.get(u'Driftskostnad', '')
                        .replace(u' kr/\xe5r', '').replace(u'\xa0', u''))
-        except ValueError:
+        except Exception:
             cost = None
         item['cost_per_year'] = cost
 
