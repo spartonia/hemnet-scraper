@@ -30,7 +30,7 @@ living_area = [None, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 500]
 fee = [None, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 7000, 30000]
 
 
-def url_queries():
+def url_queries(sold_age):
     d_ = {
         'location_ids': location_ids,
         'item_types': item_types,
@@ -49,6 +49,7 @@ def url_queries():
             'living_area_max': params['living_area'][1],
             'fee_min': params['fee'][0],
             'fee_max': params['fee'][1],
+            'sold_age': sold_age
         }
         return urlencode(url_query)
 
@@ -56,22 +57,23 @@ def url_queries():
     return [_encode_query(p) for p in param_list]
 
 
-def start_urls():
-    return [BASE_URL + qry for qry in url_queries()]
+def start_urls(sold_age):
+    return [BASE_URL + qry for qry in url_queries(sold_age)]
 
 
 class HemnetSpider(scrapy.Spider):
     name = 'hemnetspider'
     rotate_user_agent = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, sold_age='1m', *args, **kwargs):
         super(HemnetSpider, self).__init__(*args, **kwargs)
+        self.sold_age = sold_age
         engine = db_connect()
         create_hemnet_table(engine)
         self.session = sessionmaker(bind=engine)()
 
     def start_requests(self):
-        for url in start_urls():
+        for url in start_urls(self.sold_age):
             yield scrapy.Request(url, self.parse,
                                  errback=self.download_err_back)
 
@@ -208,6 +210,7 @@ class HemnetSpider(scrapy.Spider):
         item['sold_date'] = props.get('sold_at_date')
         item['address'] = props.get('street_address')
         item['geographic_area'] = props.get('location')
+        import ipdb; ipdb.set_trace()
         yield item
 
         prev_page_url = response.css('link[rel=prev]::attr(href)')\
